@@ -1,0 +1,229 @@
+[project]
+name = "saturn-mousehunter-crawler-service"
+version = "0.1.0"
+description = "Saturn MouseHunter Crawler Service - Dragonfly task consumer and web scraping engine"
+readme = "README.md"
+authors = [
+    { name = "Saturn MouseHunter Team", email = "team@saturn-mousehunter.com" }
+]
+license = { text = "MIT" }
+requires-python = ">=3.12"
+keywords = ["crawler", "fastapi", "dragonfly", "task-queue", "web-scraping"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Internet :: WWW/HTTP :: Indexing/Search",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+# Core dependencies
+dependencies = [
+    # FastAPI ecosystem
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.24.0,<0.25.0",
+    "pydantic>=2.5.0,<3.0.0",
+    "pydantic-settings>=2.1.0,<3.0.0",
+
+    # HTTP client and scraping
+    "httpx>=0.28.1,<0.30.0",
+    "aiohttp>=3.9.0,<4.0.0",
+
+    # Logging
+    "loguru>=0.7.0,<0.8.0",
+
+    # Environment and configuration
+    "python-dotenv>=1.0.0,<2.0.0",
+
+    # Data processing
+    "pandas>=2.0.0,<3.0.0",
+    "numpy>=1.24.0,<2.0.0",
+
+    # Utilities
+    "python-dateutil>=2.8.0,<3.0.0",
+    "pytz>=2023.3",
+    "psutil>=5.9.0,<6.0.0",  # System and process monitoring
+
+    # JSON processing
+    "orjson>=3.11.3",
+
+    # Local shared library
+    "saturn-mousehunter-shared>=0.1.0",
+]
+
+# Optional dependencies for different environments
+[project.optional-dependencies]
+# Development dependencies
+dev = [
+    # Testing
+    "coverage>=7.0.0,<8.0.0",
+
+    # Code quality
+    "ruff>=0.1.0,<0.2.0",
+    "black>=23.0.0,<24.0.0",
+    "mypy>=1.5.0,<2.0.0",
+
+    # Development tools
+    "pre-commit>=3.0.0,<4.0.0",
+]
+
+# Testing dependencies
+test = [
+    # Core testing (using unittest, not pytest)
+    "coverage>=7.0.0,<8.0.0",
+    "httpx>=0.28.1,<0.30.0",  # For testing async endpoints
+
+    # Test data and fixtures
+    "factory-boy>=3.3.0,<4.0.0",
+    "freezegun>=1.2.0,<2.0.0",
+]
+
+# Production dependencies
+prod = [
+    # Monitoring and observability
+    "prometheus-client>=0.18.0,<0.19.0",
+
+    # Security
+    "cryptography>=41.0.0,<42.0.0",
+]
+
+# All optional dependencies
+all = [
+    "saturn-mousehunter-crawler-service[dev,test,prod]"
+]
+
+[project.scripts]
+saturn-crawler-service = "saturn_mousehunter_crawler_service.main:main"
+
+[project.urls]
+Homepage = "https://github.com/cenwei/saturn-mousehunter-crawler-service"
+Repository = "https://github.com/cenwei/saturn-mousehunter-crawler-service"
+Issues = "https://github.com/cenwei/saturn-mousehunter-crawler-service/issues"
+
+# Build system configuration
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+# uv specific configuration
+[tool.uv]
+# Development dependencies installer
+dev-dependencies = [
+    "saturn-mousehunter-crawler-service[dev,test]"
+]
+
+# Source configuration for local packages
+[tool.uv.sources]
+saturn-mousehunter-shared = { workspace = true }
+
+# Package finder configuration
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["*"]
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+# Ruff configuration for linting
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "C4",  # flake8-comprehensions
+    "UP",  # pyupgrade
+    "ARG", # flake8-unused-arguments
+    "SIM", # flake8-simplify
+    "TCH", # flake8-type-checking
+]
+ignore = [
+    "E501",  # Line too long (handled by black)
+    "B008",  # Do not perform function calls in argument defaults
+    "B006",  # Do not use mutable data structures for argument defaults
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*" = ["ARG", "S101"]  # Allow unused args and assert in tests
+"__init__.py" = ["F401"]  # Allow unused imports in __init__.py
+
+[tool.ruff.lint.isort]
+known-first-party = ["saturn_mousehunter_crawler_service", "saturn_mousehunter_shared"]
+
+# Black configuration for formatting
+[tool.black]
+line-length = 100
+target-version = ['py312']
+include = '\.pyi?$'
+extend-exclude = '''
+/(
+  # directories
+  \.eggs
+  | \.git
+  | \.hg
+  | \.mypy_cache
+  | \.tox
+  | \.venv
+  | build
+  | dist
+)/
+'''
+
+# MyPy configuration for type checking
+[tool.mypy]
+python_version = "3.12"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+disallow_untyped_decorators = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+warn_unreachable = true
+strict_equality = true
+show_error_codes = true
+
+[[tool.mypy.overrides]]
+module = [
+    "aiohttp.*",
+    "httpx.*",
+    "saturn_mousehunter_shared.*"
+]
+ignore_missing_imports = true
+
+# Coverage configuration
+[tool.coverage.run]
+source = ["src"]
+omit = [
+    "*/tests/*",
+    "*/test_*.py",
+    "*/__init__.py",
+    "*/venv/*",
+    "*/.venv/*"
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "@abstractmethod",
+]
+show_missing = true
+precision = 2
+
+[tool.coverage.html]
+directory = "htmlcov"
