@@ -1,0 +1,49 @@
+# 爬虫服务环境变量配置
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: saturn-crawler-config
+  namespace: saturn-mousehunter
+data:
+  # Dragonfly 队列配置
+  DRAGONFLY_HOST: "192.168.8.188"
+  DRAGONFLY_PORT: "30010"
+
+  # 爬虫服务配置
+  CRAWLER_SERVICE_PORT: "8006"
+  TASK_TIMEOUT_SECONDS: "300"
+  MAX_CONCURRENT_TASKS: "5"
+
+  # 支持的市场和任务类型
+  SUPPORTED_MARKETS: "CN,HK,US"
+  SUPPORTED_TASK_TYPES: "1d_backfill,15m_backfill,1m_realtime,5m_realtime,15m_realtime"
+
+  # 代理池配置
+  PROXY_POOL_HOST: "192.168.8.168"
+  PROXY_POOL_PORT: "8005"
+  ENABLE_PROXY_INJECTION: "true"
+  ENABLE_COOKIE_INJECTION: "true"
+
+  # 日志配置
+  LOG_LEVEL: "INFO"
+  LOG_FORMAT: "json"
+
+  # 健康检查配置
+  HEALTH_CHECK_TIMEOUT: "5"
+  GRACEFUL_SHUTDOWN_TIMEOUT: "120"
+
+---
+# 敏感信息配置
+apiVersion: v1
+kind: Secret
+metadata:
+  name: saturn-crawler-secret
+  namespace: saturn-mousehunter
+type: Opaque
+data:
+  # Base64编码的敏感配置
+  # echo -n "your-secret" | base64
+  DRAGONFLY_AUTH_TOKEN: ""  # 如果需要认证
+  DATABASE_PASSWORD: ""     # 数据库密码
+  API_SECRET_KEY: ""        # API密钥

@@ -1,0 +1,246 @@
+# Saturn MouseHunter 爬虫服务 K8s 部署配置
+# 支持动态优先级伸缩和优雅关闭
+
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: saturn-crawler-critical
+  namespace: saturn-mousehunter
+  labels:
+    app: saturn-crawler
+    priority: critical
+    component: crawler-service
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0    # 保证高可用，不允许Pod不可用
+      maxSurge: 1         # 最多额外启动1个Pod
+  selector:
+    matchLabels:
+      app: saturn-crawler
+      priority: critical
+  template:
+    metadata:
+      labels:
+        app: saturn-crawler
+        priority: critical
+        component: crawler-service
+    spec:
+      terminationGracePeriodSeconds: 120  # 优雅关闭等待时间
+      containers:
+      - name: crawler
+        image: ghcr.io/saturn-mousehunter/saturn-crawler-service:latest
+        ports:
+        - containerPort: 8006
+          name: http
+        env:
+        - name: WORKER_ID
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: MAX_CONCURRENT_TASKS
+          value: "10"
+        - name: QUEUE_PRIORITIES
+          value: "critical,high"  # 订阅关键和高优先级队列
+        - name: DRAGONFLY_HOST
+          value: "192.168.8.188"
+        - name: DRAGONFLY_PORT
+          value: "30010"
+        - name: CRAWLER_SERVICE_PORT
+          value: "8006"
+        - name: TASK_TIMEOUT_SECONDS
+          value: "300"
+        - name: SUPPORTED_MARKETS
+          value: "CN,HK,US"
+        - name: SUPPORTED_TASK_TYPES
+          value: "1d_backfill,15m_backfill,1m_realtime,5m_realtime,15m_realtime"
+        resources:
+          requests:
+            cpu: 300m
+            memory: 512Mi
+          limits:
+            cpu: 800m
+            memory: 1Gi
+        lifecycle:
+          preStop:
+            exec:
+              command: ["/bin/sh", "-c", "kill -TERM 1 && sleep 90"]  # 发送TERM信号并等待
+        readinessProbe:
+          httpGet:
+            path: /health/ready
+            port: 8006
+          initialDelaySeconds: 15
+          periodSeconds: 5
+          timeoutSeconds: 3
+          successThreshold: 1
+          failureThreshold: 3
+        livenessProbe:
+          httpGet:
+            path: /health/live
+            port: 8006
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: saturn-crawler-high
+  namespace: saturn-mousehunter
+  labels:
+    app: saturn-crawler
+    priority: high
+    component: crawler-service
+spec:
+  replicas: 4
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: saturn-crawler
+      priority: high
+  template:
+    metadata:
+      labels:
+        app: saturn-crawler
+        priority: high
+        component: crawler-service
+    spec:
+      terminationGracePeriodSeconds: 120
+      containers:
+      - name: crawler
+        image: ghcr.io/saturn-mousehunter/saturn-crawler-service:latest
+        ports:
+        - containerPort: 8006
+          name: http
+        env:
+        - name: WORKER_ID
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: MAX_CONCURRENT_TASKS
+          value: "8"
+        - name: QUEUE_PRIORITIES
+          value: "high,normal"  # 订阅高和普通优先级队列
+        - name: DRAGONFLY_HOST
+          value: "192.168.8.188"
+        - name: DRAGONFLY_PORT
+          value: "30010"
+        - name: CRAWLER_SERVICE_PORT
+          value: "8006"
+        - name: TASK_TIMEOUT_SECONDS
+          value: "300"
+        - name: SUPPORTED_MARKETS
+          value: "CN,HK,US"
+        - name: SUPPORTED_TASK_TYPES
+          value: "1d_backfill,15m_backfill,1m_realtime,5m_realtime,15m_realtime"
+        resources:
+          requests:
+            cpu: 200m
+            memory: 256Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+        lifecycle:
+          preStop:
+            exec:
+              command: ["/bin/sh", "-c", "kill -TERM 1 && sleep 60"]
+        readinessProbe:
+          httpGet:
+            path: /health/ready
+            port: 8006
+          initialDelaySeconds: 10
+          periodSeconds: 5
+        livenessProbe:
+          httpGet:
+            path: /health/live
+            port: 8006
+          initialDelaySeconds: 30
+          periodSeconds: 10
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: saturn-crawler-normal
+  namespace: saturn-mousehunter
+  labels:
+    app: saturn-crawler
+    priority: normal
+    component: crawler-service
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 1
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: saturn-crawler
+      priority: normal
+  template:
+    metadata:
+      labels:
+        app: saturn-crawler
+        priority: normal
+        component: crawler-service
+    spec:
+      terminationGracePeriodSeconds: 90
+      containers:
+      - name: crawler
+        image: ghcr.io/saturn-mousehunter/saturn-crawler-service:latest
+        ports:
+        - containerPort: 8006
+          name: http
+        env:
+        - name: WORKER_ID
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: MAX_CONCURRENT_TASKS
+          value: "5"
+        - name: QUEUE_PRIORITIES
+          value: "normal"  # 仅订阅普通优先级队列
+        - name: DRAGONFLY_HOST
+          value: "192.168.8.188"
+        - name: DRAGONFLY_PORT
+          value: "30010"
+        - name: CRAWLER_SERVICE_PORT
+          value: "8006"
+        - name: TASK_TIMEOUT_SECONDS
+          value: "600"
+        - name: SUPPORTED_MARKETS
+          value: "CN,HK,US"
+        - name: SUPPORTED_TASK_TYPES
+          value: "1d_backfill,15m_backfill,1m_realtime,5m_realtime,15m_realtime"
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 300m
+            memory: 256Mi
+        lifecycle:
+          preStop:
+            exec:
+              command: ["/bin/sh", "-c", "kill -TERM 1 && sleep 45"]
+        readinessProbe:
+          httpGet:
+            path: /health/ready
+            port: 8006
+          initialDelaySeconds: 10
+          periodSeconds: 5
+        livenessProbe:
+          httpGet:
+            path: /health/live
+            port: 8006
+          initialDelaySeconds: 30
+          periodSeconds: 10

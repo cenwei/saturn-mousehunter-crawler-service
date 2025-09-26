@@ -1,0 +1,90 @@
+version: '3.8'
+
+services:
+  saturn-crawler-service:
+    build: .
+    image: saturn-mousehunter-crawler:latest
+    container_name: saturn-crawler-service
+    ports:
+      - "8006:8006"
+    environment:
+      # 服务配置
+      CRAWLER_SERVICE_PORT: 8006
+      WORKER_ID: crawler-worker-${HOSTNAME:-001}
+      MAX_CONCURRENT_TASKS: 5
+      TASK_TIMEOUT_SECONDS: 300
+
+      # Dragonfly 配置
+      DRAGONFLY_HOST: 192.168.8.188
+      DRAGONFLY_PORT: 30010
+
+      # 代理池配置
+      PROXY_POOL_HOST: 192.168.8.168
+      PROXY_POOL_PORT: 8005
+      ENABLE_PROXY_INJECTION: true
+      ENABLE_COOKIE_INJECTION: true
+
+      # 日志配置
+      LOG_LEVEL: INFO
+      LOG_FORMAT: json
+
+      # 健康检查配置
+      HEALTH_CHECK_TIMEOUT: 5
+      GRACEFUL_SHUTDOWN_TIMEOUT: 120
+
+      # K8s 配置 (如果在 K8s 环境中)
+      KUBERNETES_ENABLED: false
+
+    volumes:
+      - ./logs:/app/logs
+      - ./data:/app/data
+
+    networks:
+      - saturn-network
+
+    restart: unless-stopped
+
+    # 资源限制
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+
+  # 如果需要多个爬虫实例
+  saturn-crawler-service-2:
+    build: .
+    image: saturn-mousehunter-crawler:latest
+    container_name: saturn-crawler-service-2
+    ports:
+      - "8007:8006"
+    environment:
+      CRAWLER_SERVICE_PORT: 8006
+      WORKER_ID: crawler-worker-002
+      DRAGONFLY_HOST: 192.168.8.188
+      DRAGONFLY_PORT: 30010
+      PROXY_POOL_HOST: 192.168.8.168
+      PROXY_POOL_PORT: 8005
+      ENABLE_PROXY_INJECTION: true
+      ENABLE_COOKIE_INJECTION: true
+      LOG_LEVEL: INFO
+      GRACEFUL_SHUTDOWN_TIMEOUT: 120
+
+    volumes:
+      - ./logs-2:/app/logs
+      - ./data-2:/app/data
+
+    networks:
+      - saturn-network
+
+    restart: unless-stopped
+
+networks:
+  saturn-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16

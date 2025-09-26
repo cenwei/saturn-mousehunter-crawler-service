@@ -1,0 +1,19 @@
+{
+  "test_timestamp": 1758684837.8285775,
+  "test_symbol": "SH600000",
+  "cookie_available": true,
+  "proxy_available": false,
+  "direct_crawling_result": {
+    "success": false,
+    "error": "http_error: 400",
+    "status_code": 400,
+    "response_text": "{\"error_description\":\"遇到错误，请刷新页面或者重新登录帐号后再试\",\"error_uri\":\"/v5/stock/chart/kline.json\",\"error_data\":null,\"error_code\":\"400016\"}"
+  },
+  "core_engine_result": null,
+  "summary": {
+    "cookie_test": "success",
+    "proxy_test": "no_proxy",
+    "direct_crawling_test": "failed",
+    "core_engine_test": "failed"
+  }
+}

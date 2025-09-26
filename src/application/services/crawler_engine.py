@@ -1,6 +1,7 @@
 """
 爬虫引擎
 集成代理注入的HTTP数据抓取引擎
+整合雪球核心爬虫引擎，对齐之前的雪球爬虫方案接口
 """
 import asyncio
 import json
@@ -13,6 +14,7 @@ from saturn_mousehunter_shared.log.logger import get_logger
 from saturn_mousehunter_shared.mq.message_types import DragonflyTask
 
 from application.services.proxy_integration_service import ProxyIntegrationService, InjectionContext
+from application.services.xueqiu_core_engine import XueqiuCoreEngine
 from infrastructure.settings.config import CrawlerSettings
 
 log = get_logger(__name__)
@@ -32,28 +34,30 @@ class CrawlingResult:
 
 
 class CrawlerEngine:
-    """爬虫引擎"""
+    """爬虫引擎 - 整合雪球核心引擎"""
 
     def __init__(self, proxy_service: ProxyIntegrationService, settings: Optional[CrawlerSettings] = None):
         self.proxy_service = proxy_service
         self.settings = settings or CrawlerSettings()
 
-        # 任务处理器映射
+        # 初始化雪球核心引擎
+        self.xueqiu_engine = XueqiuCoreEngine(self.settings)
+
+        # 任务处理器映射 (优先使用雪球核心引擎)
         self.task_handlers = {
-            "1m_realtime": self._handle_realtime_kline,
-            "5m_realtime": self._handle_realtime_kline,
-            "15m_realtime": self._handle_realtime_kline,
-            "15m_backfill": self._handle_backfill_kline,
-            "1d_backfill": self._handle_backfill_kline
+            "1m_realtime": self._handle_cn_realtime_with_core,
+            "5m_realtime": self._handle_cn_realtime_with_core,
+            "15m_realtime": self._handle_cn_realtime_with_core,
+            "15m_backfill": self._handle_cn_backfill_with_core,
+            "1d_backfill": self._handle_cn_backfill_with_core,
+            # 其他市场保留原有逻辑
+            "us_1m_realtime": self._handle_us_realtime_kline,
+            "us_5m_realtime": self._handle_us_realtime_kline,
+            "hk_1m_realtime": self._handle_hk_realtime_kline
         }
 
-        # 市场端点配置
+        # 市场端点配置 (保留用于US/HK市场)
         self.market_endpoints = {
-            "CN": {
-                "kline_api": "https://stock.xueqiu.com/v5/stock/chart/kline.json",
-                "quote_api": "https://stock.xueqiu.com/v5/stock/quote.json",
-                "batch_quote_api": "https://stock.xueqiu.com/v5/stock/batch/quote.json"
-            },
             "US": {
                 "kline_api": "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}",
                 "quote_api": "https://query1.finance.yahoo.com/v6/finance/quote",
@@ -69,9 +73,13 @@ class CrawlerEngine:
     async def initialize(self):
         """初始化爬虫引擎"""
         try:
+            # 初始化雪球核心引擎
+            await self.xueqiu_engine.initialize()
+
             log.info("爬虫引擎初始化成功",
-                    supported_markets=list(self.market_endpoints.keys()),
-                    supported_task_types=list(self.task_handlers.keys()))
+                    supported_markets=list(self.market_endpoints.keys()) + ["CN"],
+                    supported_task_types=list(self.task_handlers.keys()),
+                    xueqiu_core_enabled=True)
 
         except Exception as e:
             log.error("爬虫引擎初始化失败", error=str(e))
@@ -139,200 +147,156 @@ class CrawlerEngine:
                      response_time=response_time)
             return False
 
-    async def _handle_realtime_kline(self, task: DragonflyTask, context: InjectionContext) -> CrawlingResult:
-        """处理实时K线任务"""
+    async def _handle_cn_realtime_with_core(self, task: DragonflyTask, context: InjectionContext) -> CrawlingResult:
+        """使用雪球核心引擎处理中国市场实时K线任务"""
         try:
-            # 构建实时K线请求参数
-            payload = task.payload
-            symbol = task.symbol
-            timeframe = task.timeframe
+            # 构建雪球核心引擎任务数据
+            task_data = {
+                "task_id": task.task_id,
+                "endpoint": "kline",
+                "symbol": task.symbol,
+                "cookie_id": context.cookie_data.get("cookie_id", "") if context.cookie_data else "",
+                "proxy": context.proxy_config.get("proxy_url") if context.proxy_config else None,
+                "params": {
+                    "symbol": task.symbol,
+                    "period": self._convert_timeframe_for_xueqiu(task.task_type),
+                    **task.payload  # 合并任务载荷中的额外参数
+                }
+            }
 
-            # 根据市场构建不同的请求
-            if task.market == "CN":
-                return await self._fetch_cn_realtime_kline(task, context, symbol, timeframe)
-            elif task.market == "US":
-                return await self._fetch_us_realtime_kline(task, context, symbol, timeframe)
-            elif task.market == "HK":
-                return await self._fetch_hk_realtime_kline(task, context, symbol, timeframe)
-            else:
-                raise ValueError(f"不支持的市场: {task.market}")
+            # 使用雪球核心引擎执行任务
+            result = await self.xueqiu_engine.execute_task_with_streams(task_data)
+
+            # 转换结果格式
+            return CrawlingResult(
+                task_id=task.task_id,
+                success=result.get("success", False),
+                data=result.get("data"),
+                error=result.get("error"),
+                status_code=result.get("status_code"),
+                response_time=result.get("response_time", 0.0),
+                records_count=result.get("records_count", 0),
+                metadata={
+                    "market": "CN",
+                    "source": "xueqiu_core",
+                    "engine_version": "1.0.0",
+                    **result.get("metadata", {})
+                }
+            )
 
         except Exception as e:
+            log.error("雪球核心引擎处理失败", task_id=task.task_id, error=str(e))
             return CrawlingResult(
                 task_id=task.task_id,
                 success=False,
-                error=str(e)
+                error=f"xueqiu_core_error: {str(e)}"
             )
 
-    async def _handle_backfill_kline(self, task: DragonflyTask, context: InjectionContext) -> CrawlingResult:
-        """处理回填K线任务"""
+    async def _handle_cn_backfill_with_core(self, task: DragonflyTask, context: InjectionContext) -> CrawlingResult:
+        """使用雪球核心引擎处理中国市场回填K线任务"""
         try:
             payload = task.payload
-            symbol = task.symbol
-            timeframe = task.timeframe
             start_date = payload.get("start_date")
             end_date = payload.get("end_date")
 
-            # 根据市场构建不同的请求
-            if task.market == "CN":
-                return await self._fetch_cn_backfill_kline(task, context, symbol, timeframe, start_date, end_date)
-            elif task.market == "US":
-                return await self._fetch_us_backfill_kline(task, context, symbol, timeframe, start_date, end_date)
-            elif task.market == "HK":
-                return await self._fetch_hk_backfill_kline(task, context, symbol, timeframe, start_date, end_date)
-            else:
-                raise ValueError(f"不支持的市场: {task.market}")
-
-        except Exception as e:
-            return CrawlingResult(
-                task_id=task.task_id,
-                success=False,
-                error=str(e)
-            )
-
-    async def _fetch_cn_realtime_kline(self, task: DragonflyTask, context: InjectionContext,
-                                     symbol: str, timeframe: str) -> CrawlingResult:
-        """获取中国市场实时K线"""
-        try:
-            # 创建HTTP客户端
-            client = await self.proxy_service.create_http_client(context)
-
-            # 构建雪球API参数
-            params = {
-                "symbol": symbol,
-                "begin": int(datetime.now().timestamp() * 1000) - 24*60*60*1000,  # 24小时前
-                "period": timeframe,
-                "type": "before",
-                "count": -100,  # 最近100条
-                "indicator": "kline,pe,pb,ps,pcf,market_capital,agt,ggt,balance"
+            # 构建雪球回填任务数据
+            task_data = {
+                "task_id": task.task_id,
+                "endpoint": "kline",
+                "symbol": task.symbol,
+                "cookie_id": context.cookie_data.get("cookie_id", "") if context.cookie_data else "",
+                "proxy": context.proxy_config.get("proxy_url") if context.proxy_config else None,
+                "params": {
+                    "symbol": task.symbol,
+                    "period": self._convert_timeframe_for_xueqiu(task.task_type),
+                    "begin": self._date_to_timestamp(end_date) if end_date else None,
+                    "count": -1000,  # 批量获取历史数据
+                    "type": "before",
+                    **task.payload
+                }
             }
 
-            api_url = self.market_endpoints["CN"]["kline_api"]
+            # 使用雪球核心引擎执行任务
+            result = await self.xueqiu_engine.execute_task_with_streams(task_data)
 
-            async with client:
-                response = await client.get(api_url, params=params)
+            # 对于回填任务，可能需要额外的数据过滤
+            if result.get("success") and start_date:
+                result = await self._filter_backfill_data(result, start_date, end_date)
 
-                if response.status_code == 200:
-                    data = response.json()
-
-                    # 解析雪球K线数据
-                    if data.get("error_code") == 0 and "data" in data:
-                        kline_data = data["data"]
-                        item_count = len(kline_data.get("item", []))
-
-                        return CrawlingResult(
-                            task_id=task.task_id,
-                            success=True,
-                            data=kline_data,
-                            status_code=response.status_code,
-                            response_time=response.elapsed.total_seconds(),
-                            records_count=item_count,
-                            metadata={
-                                "market": "CN",
-                                "symbol": symbol,
-                                "timeframe": timeframe,
-                                "source": "xueqiu"
-                            }
-                        )
-                    else:
-                        return CrawlingResult(
-                            task_id=task.task_id,
-                            success=False,
-                            error=f"API返回错误: {data.get('error_description', '未知错误')}",
-                            status_code=response.status_code
-                        )
-                else:
-                    return CrawlingResult(
-                        task_id=task.task_id,
-                        success=False,
-                        error=f"HTTP错误: {response.status_code}",
-                        status_code=response.status_code
-                    )
+            return CrawlingResult(
+                task_id=task.task_id,
+                success=result.get("success", False),
+                data=result.get("data"),
+                error=result.get("error"),
+                status_code=result.get("status_code"),
+                response_time=result.get("response_time", 0.0),
+                records_count=result.get("records_count", 0),
+                metadata={
+                    "market": "CN",
+                    "source": "xueqiu_core",
+                    "engine_version": "1.0.0",
+                    "backfill_range": f"{start_date}~{end_date}",
+                    **result.get("metadata", {})
+                }
+            )
 
         except Exception as e:
+            log.error("雪球核心回填引擎处理失败", task_id=task.task_id, error=str(e))
             return CrawlingResult(
                 task_id=task.task_id,
                 success=False,
-                error=str(e)
+                error=f"xueqiu_core_backfill_error: {str(e)}"
             )
 
-    async def _fetch_cn_backfill_kline(self, task: DragonflyTask, context: InjectionContext,
-                                     symbol: str, timeframe: str, start_date: str, end_date: str) -> CrawlingResult:
-        """获取中国市场回填K线"""
+    def _convert_timeframe_for_xueqiu(self, task_type: str) -> str:
+        """将任务类型转换为雪球时间周期格式"""
+        mapping = {
+            "1m_realtime": "1m",
+            "5m_realtime": "5m",
+            "15m_realtime": "15m",
+            "15m_backfill": "15m",
+            "1d_backfill": "day"
+        }
+        return mapping.get(task_type, "day")
+
+    def _date_to_timestamp(self, date_str: str) -> int:
+        """将日期字符串转换为时间戳(毫秒)"""
         try:
-            client = await self.proxy_service.create_http_client(context)
+            dt = datetime.strptime(date_str, "%Y-%m-%d")
+            return int(dt.timestamp() * 1000)
+        except:
+            return int(datetime.now().timestamp() * 1000)
 
-            # 转换日期格式
-            start_timestamp = int(datetime.strptime(start_date, "%Y-%m-%d").timestamp() * 1000)
-            end_timestamp = int(datetime.strptime(end_date, "%Y-%m-%d").timestamp() * 1000)
+    async def _filter_backfill_data(self, result: Dict[str, Any], start_date: str, end_date: str) -> Dict[str, Any]:
+        """过滤回填数据的日期范围"""
+        try:
+            if not result.get("success") or not result.get("data"):
+                return result
 
-            params = {
-                "symbol": symbol,
-                "begin": end_timestamp,
-                "period": timeframe,
-                "type": "before",
-                "count": -1000,  # 批量获取
-                "indicator": "kline,pe,pb,ps,pcf,market_capital,agt,ggt,balance"
-            }
+            data = result["data"]
+            if "item" not in data or not isinstance(data["item"], list):
+                return result
 
-            api_url = self.market_endpoints["CN"]["kline_api"]
+            start_ts = self._date_to_timestamp(start_date)
+            end_ts = self._date_to_timestamp(end_date)
 
-            async with client:
-                response = await client.get(api_url, params=params)
+            # 过滤时间范围内的数据点
+            filtered_items = [
+                item for item in data["item"]
+                if isinstance(item, list) and len(item) > 0 and start_ts <= item[0] <= end_ts
+            ]
 
-                if response.status_code == 200:
-                    data = response.json()
+            # 更新数据和记录数
+            result["data"]["item"] = filtered_items
+            result["records_count"] = len(filtered_items)
 
-                    if data.get("error_code") == 0 and "data" in data:
-                        kline_data = data["data"]
-                        items = kline_data.get("item", [])
-
-                        # 过滤日期范围内的数据
-                        filtered_items = [
-                            item for item in items
-                            if start_timestamp <= item[0] <= end_timestamp
-                        ]
-
-                        return CrawlingResult(
-                            task_id=task.task_id,
-                            success=True,
-                            data={**kline_data, "item": filtered_items},
-                            status_code=response.status_code,
-                            response_time=response.elapsed.total_seconds(),
-                            records_count=len(filtered_items),
-                            metadata={
-                                "market": "CN",
-                                "symbol": symbol,
-                                "timeframe": timeframe,
-                                "start_date": start_date,
-                                "end_date": end_date,
-                                "source": "xueqiu"
-                            }
-                        )
-                    else:
-                        return CrawlingResult(
-                            task_id=task.task_id,
-                            success=False,
-                            error=f"API返回错误: {data.get('error_description', '未知错误')}",
-                            status_code=response.status_code
-                        )
-                else:
-                    return CrawlingResult(
-                        task_id=task.task_id,
-                        success=False,
-                        error=f"HTTP错误: {response.status_code}",
-                        status_code=response.status_code
-                    )
+            return result
 
         except Exception as e:
-            return CrawlingResult(
-                task_id=task.task_id,
-                success=False,
-                error=str(e)
-            )
+            log.warning("过滤回填数据失败", error=str(e))
+            return result
 
-    async def _fetch_us_realtime_kline(self, task: DragonflyTask, context: InjectionContext,
-                                     symbol: str, timeframe: str) -> CrawlingResult:
+    async def _handle_us_realtime_kline(self, task: DragonflyTask, context: InjectionContext) -> CrawlingResult:
         """获取美国市场实时K线"""
         try:
             client = await self.proxy_service.create_http_client(context)
@@ -511,6 +475,9 @@ class CrawlerEngine:
     async def shutdown(self):
         """关闭爬虫引擎"""
         try:
+            # 关闭雪球核心引擎
+            await self.xueqiu_engine.shutdown()
+
             log.info("爬虫引擎已关闭")
         except Exception as e:
             log.error("关闭爬虫引擎失败", error=str(e))

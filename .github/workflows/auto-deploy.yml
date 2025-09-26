@@ -1,0 +1,335 @@
+# Saturn MouseHunter 爬虫服务 CI/CD 自动化流水线
+name: Saturn Crawler Auto Deploy
+
+on:
+  push:
+    branches: [ main, develop ]
+    paths:
+      - 'saturn-mousehunter-crawler-service/**'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'saturn-mousehunter-crawler-service/**'
+
+env:
+  IMAGE_NAME: saturn-mousehunter-crawler
+  REGISTRY: ghcr.io
+  PORTAINER_URL: http://192.168.8.168:9000
+
+jobs:
+  # ==============================
+  # 构建和测试
+  # ==============================
+  build-and-test:
+    runs-on: ubuntu-latest
+    outputs:
+      image-tag: ${{ steps.meta.outputs.tags }}
+      image-digest: ${{ steps.build.outputs.digest }}
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.12'
+
+    - name: Install UV
+      run: |
+        curl -LsSf https://astral.sh/uv/install.sh | sh
+        source ~/.cargo/env
+
+    - name: Install dependencies
+      working-directory: saturn-mousehunter-crawler-service
+      run: |
+        uv sync
+
+    - name: Run tests
+      working-directory: saturn-mousehunter-crawler-service
+      run: |
+        uv run pytest tests/ -v
+
+    - name: Run linting
+      working-directory: saturn-mousehunter-crawler-service
+      run: |
+        uv run ruff check src/
+
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Log in to Container Registry
+      uses: docker/login-action@v3
+      with:
+        registry: ${{ env.REGISTRY }}
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Extract metadata
+      id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ${{ env.REGISTRY }}/${{ github.repository_owner }}/${{ env.IMAGE_NAME }}
+        tags: |
+          type=ref,event=branch
+          type=ref,event=pr
+          type=sha,prefix={{branch}}-
+          type=raw,value=latest,enable={{is_default_branch}}
+
+    - name: Build and push Docker image
+      id: build
+      uses: docker/build-push-action@v5
+      with:
+        context: saturn-mousehunter-crawler-service
+        push: true
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+  # ==============================
+  # Portainer 自动部署
+  # ==============================
+  deploy-portainer:
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Deploy to Portainer
+      env:
+        PORTAINER_USERNAME: ${{ secrets.PORTAINER_USERNAME }}
+        PORTAINER_PASSWORD: ${{ secrets.PORTAINER_PASSWORD }}
+        IMAGE_TAG: ${{ needs.build-and-test.outputs.image-tag }}
+      run: |
+        # 认证 Portainer
+        AUTH_RESPONSE=$(curl -s -X POST \
+          "${{ env.PORTAINER_URL }}/api/auth" \
+          -H "Content-Type: application/json" \
+          -d "{\"username\":\"$PORTAINER_USERNAME\",\"password\":\"$PORTAINER_PASSWORD\"}")
+
+        JWT_TOKEN=$(echo "$AUTH_RESPONSE" | jq -r '.jwt')
+
+        if [[ "$JWT_TOKEN" == "null" ]]; then
+          echo "Portainer 认证失败"
+          exit 1
+        fi
+
+        # 准备 Docker Compose 内容
+        COMPOSE_CONTENT=$(cat << 'EOF'
+        version: '3.8'
+        services:
+          saturn-crawler-critical:
+            image: ${IMAGE_TAG}
+            container_name: saturn-crawler-critical
+            ports:
+              - "8006:8006"
+            environment:
+              CRAWLER_SERVICE_PORT: 8006
+              WORKER_ID: crawler-critical-github
+              PRIORITY_LEVEL: CRITICAL
+              MAX_CONCURRENT_TASKS: 10
+              DRAGONFLY_QUEUES: crawler_backfill_critical,crawler_realtime_critical
+              DRAGONFLY_HOST: 192.168.8.188
+              DRAGONFLY_PORT: 30010
+              PROXY_POOL_HOST: 192.168.8.168
+              PROXY_POOL_PORT: 8005
+              ENABLE_PROXY_INJECTION: true
+              ENABLE_COOKIE_INJECTION: true
+              LOG_LEVEL: INFO
+            volumes:
+              - crawler_critical_logs:/app/logs
+            restart: unless-stopped
+            healthcheck:
+              test: ["CMD", "curl", "-f", "http://localhost:8006/health/status"]
+              interval: 30s
+              timeout: 10s
+              retries: 3
+
+          saturn-crawler-high:
+            image: ${IMAGE_TAG}
+            container_name: saturn-crawler-high
+            ports:
+              - "8008:8006"
+            environment:
+              CRAWLER_SERVICE_PORT: 8006
+              WORKER_ID: crawler-high-github
+              PRIORITY_LEVEL: HIGH
+              MAX_CONCURRENT_TASKS: 8
+              DRAGONFLY_QUEUES: crawler_backfill_high,crawler_realtime_high
+              DRAGONFLY_HOST: 192.168.8.188
+              DRAGONFLY_PORT: 30010
+              PROXY_POOL_HOST: 192.168.8.168
+              PROXY_POOL_PORT: 8005
+              ENABLE_PROXY_INJECTION: true
+              ENABLE_COOKIE_INJECTION: true
+              LOG_LEVEL: INFO
+            volumes:
+              - crawler_high_logs:/app/logs
+            restart: unless-stopped
+            healthcheck:
+              test: ["CMD", "curl", "-f", "http://localhost:8006/health/status"]
+              interval: 30s
+              timeout: 10s
+              retries: 3
+
+        volumes:
+          crawler_critical_logs:
+          crawler_high_logs:
+        EOF
+        )
+
+        # 替换镜像标签
+        COMPOSE_CONTENT=$(echo "$COMPOSE_CONTENT" | sed "s|\${IMAGE_TAG}|$IMAGE_TAG|g")
+
+        # 检查现有 Stack
+        EXISTING_STACK=$(curl -s -H "Authorization: Bearer $JWT_TOKEN" \
+          "${{ env.PORTAINER_URL }}/api/stacks" | \
+          jq -r '.[] | select(.Name == "saturn-crawler-cluster") | .Id // empty')
+
+        if [[ -n "$EXISTING_STACK" ]]; then
+          echo "更新现有 Stack (ID: $EXISTING_STACK)"
+          curl -X PUT \
+            "${{ env.PORTAINER_URL }}/api/stacks/$EXISTING_STACK" \
+            -H "Authorization: Bearer $JWT_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"stackFileContent\": \"$(echo "$COMPOSE_CONTENT" | sed 's/"/\\"/g' | tr '\n' ' ')\",
+              \"pullImage\": true,
+              \"endpointId\": 2
+            }"
+        else
+          echo "创建新的 Stack"
+          curl -X POST \
+            "${{ env.PORTAINER_URL }}/api/stacks/create/standalone/string" \
+            -H "Authorization: Bearer $JWT_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"name\": \"saturn-crawler-cluster\",
+              \"stackFileContent\": \"$(echo "$COMPOSE_CONTENT" | sed 's/"/\\"/g' | tr '\n' ' ')\",
+              \"endpointId\": 2
+            }"
+        fi
+
+    - name: Verify Deployment
+      run: |
+        echo "等待服务启动..."
+        sleep 30
+
+        # 检查服务健康状态
+        services=("8006" "8008")
+        service_names=("Critical" "High")
+
+        for i in "${!services[@]}"; do
+          port="${services[i]}"
+          name="${service_names[i]}"
+
+          if curl -s -f --connect-timeout 10 "http://192.168.8.168:${port}/health/status" > /dev/null; then
+            echo "✅ ${name} 爬虫服务健康"
+          else
+            echo "❌ ${name} 爬虫服务不健康"
+          fi
+        done
+
+  # ==============================
+  # 多宿主机部署
+  # ==============================
+  deploy-multi-host:
+    needs: build-and-test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup SSH
+      uses: webfactory/ssh-agent@v0.8.0
+      with:
+        ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
+
+    - name: Deploy to Multiple Hosts
+      env:
+        IMAGE_TAG: ${{ needs.build-and-test.outputs.image-tag }}
+      run: |
+        # 宿主机配置
+        HOSTS=(
+          "192.168.8.101:22:critical"
+          "192.168.8.102:22:high"
+          "192.168.8.103:22:normal"
+        )
+
+        DEPLOY_DIR="/opt/saturn-crawler"
+
+        for host_config in "${HOSTS[@]}"; do
+          host=$(echo "$host_config" | cut -d: -f1)
+          role=$(echo "$host_config" | cut -d: -f3)
+
+          echo "部署到 $host ($role)..."
+
+          # 生成 Docker Compose 配置
+          cat > "/tmp/compose-${host}.yml" << EOF
+        version: '3.8'
+        services:
+          saturn-crawler-${role}:
+            image: ${IMAGE_TAG}
+            container_name: saturn-crawler-${role}
+            ports:
+              - "8006:8006"
+            environment:
+              CRAWLER_SERVICE_PORT: 8006
+              WORKER_ID: crawler-${role}-${host}
+              PRIORITY_LEVEL: ${role^^}
+              DRAGONFLY_HOST: 192.168.8.188
+              DRAGONFLY_PORT: 30010
+              PROXY_POOL_HOST: 192.168.8.168
+              PROXY_POOL_PORT: 8005
+              ENABLE_PROXY_INJECTION: true
+              ENABLE_COOKIE_INJECTION: true
+            volumes:
+              - ./logs:/app/logs
+            restart: unless-stopped
+        EOF
+
+          # 传输配置文件
+          scp -o StrictHostKeyChecking=no "/tmp/compose-${host}.yml" "root@$host:$DEPLOY_DIR/docker-compose.yml"
+
+          # 部署服务
+          ssh -o StrictHostKeyChecking=no "root@$host" << EOF
+            cd $DEPLOY_DIR
+            docker-compose down --remove-orphans || true
+            docker pull $IMAGE_TAG
+            docker-compose up -d
+        EOF
+
+          echo "✅ $host 部署完成"
+        done
+
+  # ==============================
+  # 通知
+  # ==============================
+  notify:
+    needs: [build-and-test, deploy-portainer, deploy-multi-host]
+    runs-on: ubuntu-latest
+    if: always()
+
+    steps:
+    - name: Notify Success
+      if: ${{ needs.build-and-test.result == 'success' && (needs.deploy-portainer.result == 'success' || needs.deploy-multi-host.result == 'success') }}
+      run: |
+        echo "🎉 Saturn MouseHunter 爬虫服务自动部署成功！"
+        echo "镜像标签: ${{ needs.build-and-test.outputs.image-tag }}"
+
+        # 可以集成钉钉、企微、Slack 等通知
+        # curl -X POST "webhook_url" -d "部署成功消息"
+
+    - name: Notify Failure
+      if: ${{ needs.build-and-test.result == 'failure' || needs.deploy-portainer.result == 'failure' || needs.deploy-multi-host.result == 'failure' }}
+      run: |
+        echo "❌ Saturn MouseHunter 爬虫服务部署失败！"
+
+        # 发送失败通知
+        # curl -X POST "webhook_url" -d "部署失败消息"

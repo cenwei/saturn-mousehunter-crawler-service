@@ -1,0 +1,195 @@
+# Saturn MouseHunter Crawler Service - Portainer Stack
+# 在 Portainer UI 中创建新的 Stack，复制以下内容
+
+version: '3.8'
+
+services:
+  saturn-crawler-critical:
+    image: saturn-mousehunter-crawler:latest
+    container_name: saturn-crawler-critical
+    hostname: crawler-critical-${STACK_NAME:-default}
+    ports:
+      - "${CRAWLER_CRITICAL_PORT:-8006}:8006"
+    environment:
+      # 服务标识
+      CRAWLER_SERVICE_PORT: 8006
+      WORKER_ID: crawler-critical-${STACK_NAME:-default}
+      PRIORITY_LEVEL: CRITICAL
+      MAX_CONCURRENT_TASKS: 10
+
+      # 队列配置 - Critical Priority
+      DRAGONFLY_QUEUES: crawler_backfill_critical,crawler_realtime_critical
+      QUEUE_PRIORITIES: CRITICAL,HIGH
+
+      # 外部服务
+      DRAGONFLY_HOST: ${DRAGONFLY_HOST:-192.168.8.188}
+      DRAGONFLY_PORT: ${DRAGONFLY_PORT:-30010}
+      PROXY_POOL_HOST: ${PROXY_POOL_HOST:-192.168.8.168}
+      PROXY_POOL_PORT: ${PROXY_POOL_PORT:-8005}
+
+      # 功能开关
+      ENABLE_PROXY_INJECTION: true
+      ENABLE_COOKIE_INJECTION: true
+      ENABLE_K8S_SCALING: false
+
+      # 系统配置
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      GRACEFUL_SHUTDOWN_TIMEOUT: 120
+      TASK_TIMEOUT_SECONDS: 300
+
+    volumes:
+      - crawler_critical_logs:/app/logs
+      - crawler_critical_data:/app/data
+
+    networks:
+      - saturn-crawler-network
+
+    restart: unless-stopped
+
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 1G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8006/health/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  saturn-crawler-high:
+    image: saturn-mousehunter-crawler:latest
+    container_name: saturn-crawler-high
+    hostname: crawler-high-${STACK_NAME:-default}
+    ports:
+      - "${CRAWLER_HIGH_PORT:-8008}:8006"
+    environment:
+      CRAWLER_SERVICE_PORT: 8006
+      WORKER_ID: crawler-high-${STACK_NAME:-default}
+      PRIORITY_LEVEL: HIGH
+      MAX_CONCURRENT_TASKS: 8
+
+      # 队列配置 - High Priority
+      DRAGONFLY_QUEUES: crawler_backfill_high,crawler_realtime_high,crawler_backfill_normal
+      QUEUE_PRIORITIES: HIGH,NORMAL
+
+      DRAGONFLY_HOST: ${DRAGONFLY_HOST:-192.168.8.188}
+      DRAGONFLY_PORT: ${DRAGONFLY_PORT:-30010}
+      PROXY_POOL_HOST: ${PROXY_POOL_HOST:-192.168.8.168}
+      PROXY_POOL_PORT: ${PROXY_POOL_PORT:-8005}
+
+      ENABLE_PROXY_INJECTION: true
+      ENABLE_COOKIE_INJECTION: true
+      ENABLE_K8S_SCALING: false
+
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      GRACEFUL_SHUTDOWN_TIMEOUT: 120
+      TASK_TIMEOUT_SECONDS: 300
+
+    volumes:
+      - crawler_high_logs:/app/logs
+      - crawler_high_data:/app/data
+
+    networks:
+      - saturn-crawler-network
+
+    restart: unless-stopped
+
+    deploy:
+      resources:
+        limits:
+          cpus: '1.5'
+          memory: 768M
+        reservations:
+          cpus: '0.3'
+          memory: 384M
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8006/health/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  saturn-crawler-normal:
+    image: saturn-mousehunter-crawler:latest
+    container_name: saturn-crawler-normal
+    hostname: crawler-normal-${STACK_NAME:-default}
+    ports:
+      - "${CRAWLER_NORMAL_PORT:-8009}:8006"
+    environment:
+      CRAWLER_SERVICE_PORT: 8006
+      WORKER_ID: crawler-normal-${STACK_NAME:-default}
+      PRIORITY_LEVEL: NORMAL
+      MAX_CONCURRENT_TASKS: 5
+
+      # 队列配置 - Normal Priority
+      DRAGONFLY_QUEUES: crawler_backfill_normal,crawler_realtime_normal
+      QUEUE_PRIORITIES: NORMAL
+
+      DRAGONFLY_HOST: ${DRAGONFLY_HOST:-192.168.8.188}
+      DRAGONFLY_PORT: ${DRAGONFLY_PORT:-30010}
+      PROXY_POOL_HOST: ${PROXY_POOL_HOST:-192.168.8.168}
+      PROXY_POOL_PORT: ${PROXY_POOL_PORT:-8005}
+
+      ENABLE_PROXY_INJECTION: true
+      ENABLE_COOKIE_INJECTION: true
+      ENABLE_K8S_SCALING: false
+
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      GRACEFUL_SHUTDOWN_TIMEOUT: 120
+      TASK_TIMEOUT_SECONDS: 600
+
+    volumes:
+      - crawler_normal_logs:/app/logs
+      - crawler_normal_data:/app/data
+
+    networks:
+      - saturn-crawler-network
+
+    restart: unless-stopped
+
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+        reservations:
+          cpus: '0.2'
+          memory: 256M
+
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8006/health/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  crawler_critical_logs:
+  crawler_critical_data:
+  crawler_high_logs:
+  crawler_high_data:
+  crawler_normal_logs:
+  crawler_normal_data:
+
+networks:
+  saturn-crawler-network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.21.0.0/16
+
+# Environment Variables for Portainer Stack:
+# STACK_NAME=prod
+# DRAGONFLY_HOST=192.168.8.188
+# DRAGONFLY_PORT=30010
+# PROXY_POOL_HOST=192.168.8.168
+# PROXY_POOL_PORT=8005
+# LOG_LEVEL=INFO
+# CRAWLER_CRITICAL_PORT=8006
+# CRAWLER_HIGH_PORT=8008
+# CRAWLER_NORMAL_PORT=8009
